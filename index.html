@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>3D Viewer</title>
+
+  <style>
+    html, body, #app { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
+    #ui {
+      position: absolute; top: 10px; left: 10px; z-index: 10;
+      background: rgba(255,255,255,0.85); padding: 10px; border-radius: 6px;
+      font-family: sans-serif;
+    }
+    #log {
+      position: absolute; bottom: 10px; right: 10px; z-index: 10;
+      background: rgba(255,255,255,0.85); padding: 10px; border-radius: 6px;
+      max-width: 320px; max-height: 150px; overflow-y: auto;
+      font-family: monospace; font-size: 12px;
+      white-space: pre-wrap;
+    }
+    .planning-hint {
+      max-width: 220px;
+      font-size: 12px;
+      margin-top: 8px;
+    }
+    .routes-list {
+      max-height: 160px;
+      overflow-y: auto;
+      margin: 8px 0;
+      font-size: 12px;
+    }
+    .saved-route-row {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      margin-bottom: 4px;
+      flex-wrap: wrap;
+    }
+    .saved-route-row span {
+      flex: 1 1 auto;
+    }
+
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/cesium@1.124/Build/Cesium/Cesium.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/cesium@1.124/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+
+  <script>
+    Cesium.Ion.defaultAccessToken =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiIzZTMzMTVmOS0wM2RmLTQ5M2ItODM1Yy05NjU0NTMzNmNlNGUiLCJpZCI6MzU5NTY2LCJpYXQiOjE3NjI5Mjk3MzZ9.5JsL-MXNLcMQOXdJfR9I1KgDhn8GomhAJDXarer40UI";
+  </script>
+</head>
+
+<body>
+  <div id="app"></div>
+
+  <div id="ui">
+    <button id="locateBtn">Missä olen?</button><br><br>
+    <label for="heightOffset">Korkeus offset (m):</label><br>
+    <input id="heightOffset" type="range" min="-50" max="50" value="0" />
+    <span id="heightValue">0</span> m
+    <hr>
+    <button id="routePlanBtn">Plan new route</button><br><br>
+    <button id="clearRouteBtn">Clear planned route</button>
+    <p class="planning-hint">
+      Enable planning to drop a start point with the first click and an end point with the second. The route will hug the base map / terrain under the 3D model.
+    </p>
+    <hr>
+    <button id="drawRouteBtn">Start drawing route</button><br><br>
+    <label for="drawColorSelect">Route color:</label><br>
+    <select id="drawColorSelect">
+      <option value="ORANGE" selected>Orange</option>
+      <option value="YELLOW">Yellow</option>
+      <option value="CYAN">Cyan</option>
+      <option value="MAGENTA">Magenta</option>
+      <option value="LIME">Lime</option>
+      <option value="RED">Red</option>
+      <option value="WHITE">White</option>
+    </select><br><br>
+    <label for="routeNameInput">Route name:</label><br>
+    <input id="routeNameInput" type="text" placeholder="e.g. Main loop" /><br><br>
+    <button id="drawSaveBtn" disabled>Save to 3D model</button><br><br>
+    <button id="drawUndoBtn" disabled>Undo last point</button><br><br>
+    <button id="drawFinishBtn" disabled>Copy JSON</button><br><br>
+    <button id="drawRemoveBtn" disabled>Remove drawings</button>
+    <p class="planning-hint">
+      Drawing mode lets you click multiple points to trace a custom route. Once finished, copy the generated JSON into config.json.
+    </p>
+    <hr>
+    <strong>Saved routes</strong><br>
+    <div id="savedRoutesList" class="routes-list"></div>
+    <button id="exportRoutesBtn">Export routes JSON</button>
+  </div>
+
+    <div id="log">Loki käynnistyy...</div>
+
+  <script src="app.js"></script>
+</body>
+</html>
