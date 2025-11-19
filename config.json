@@ -9,29 +9,5 @@
     "pitch": -35,
     "roll": 0
   },
-  "routes": [
-    {
-      "id": "route-2",
-      "name": "Scenic edge path",
-      "description": "Alternative route along the edge of the area.",
-      "color": "CYAN",
-      "points": [
-        {
-          "lon": 24.9765,
-          "lat": 60.1857,
-          "height": 2
-        },
-        {
-          "lon": 24.9758,
-          "lat": 60.1854,
-          "height": 2
-        },
-        {
-          "lon": 24.975,
-          "lat": 60.1851,
-          "height": 2
-        }
-      ]
-    }
-  ]
+  "routes": []
 }

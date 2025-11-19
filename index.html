@@ -11,6 +11,10 @@
       position: absolute; top: 10px; left: 10px; z-index: 10;
       background: rgba(255,255,255,0.85); padding: 10px; border-radius: 6px;
       font-family: sans-serif;
+      max-height: 95vh;
+      overflow-y: auto;
+      width: 280px;
+      box-sizing: border-box;
     }
     #log {
       position: absolute; bottom: 10px; right: 10px; z-index: 10;
@@ -57,11 +61,26 @@
 
   <div id="ui">
     <button id="locateBtn">Missä olen?</button><br><br>
-    <label for="heightOffset">Korkeus offset (m):</label><br>
-    <input id="heightOffset" type="range" min="-50" max="50" value="0" />
-    <span id="heightValue">0</span> m
-    <hr>
     <button id="routePlanBtn">Plan new route</button><br><br>
+    <fieldset>
+      <legend>Choose starting point</legend>
+      <label>
+        <input type="radio" name="startMode" value="gps" checked>
+        Use my location
+      </label><br>
+      <label>
+        <input type="radio" name="startMode" value="custom">
+        Custom start point
+      </label>
+    </fieldset>
+    <br>
+    <label for="locationSearchInput">Search the map:</label><br>
+    <input id="locationSearchInput" type="text" placeholder="Address or 24.94, 60.17" />
+    <button id="locationSearchBtn">Search</button>
+    <p class="planning-hint">
+      We use OpenStreetMap to locate places. Results focus on the first match.
+    </p>
+    <hr>
     <button id="clearRouteBtn">Clear planned route</button>
     <p class="planning-hint">
       Enable planning to drop a start point with the first click and an end point with the second. The route will hug the base map / terrain under the 3D model.

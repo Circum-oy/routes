@@ -1,3 +1,56 @@
+async function handleGpsStartPlanning(pickedPos) {
+  if (!lastGps) {
+    appendLog("No GPS fix yet. Allow location access first.");
+    return;
+  }
+  const startPoint = {
+    lon: lastGps.lon,
+    lat: lastGps.lat,
+    height: lastGps.ground || 0
+  };
+  const start = await clampPointToGround(startPoint);
+  await finalizePlanningWithStartEnd(start, pickedPos);
+}
+
+async function handleCustomStartPlanning(pickedPos) {
+  const endPos = await clampPointToGround(pickedPos);
+  if (!routeStart) {
+    routeStart = endPos;
+    routeStartEntity = viewer.entities.add({
+      position: cart(endPos.lon, endPos.lat, (endPos.height || 0) + 1.5),
+      point: { pixelSize: 12, color: Cesium.Color.LIME }
+    });
+    appendLog("Custom start set. Click again for the destination.");
+    return;
+  }
+  await finalizePlanningWithStartEnd(routeStart, pickedPos);
+}
+
+async function finalizePlanningWithStartEnd(startPoint, pickedPos) {
+  const endPos = await clampPointToGround(pickedPos);
+
+  clearPlannedRoute();
+
+  routeStart = startPoint;
+  routeEnd = endPos;
+
+  routeStartEntity = viewer.entities.add({
+    position: cart(routeStart.lon, routeStart.lat, (routeStart.height || 0) + 1.5),
+    point: { pixelSize: 12, color: Cesium.Color.LIME }
+  });
+
+  routeEndEntity = viewer.entities.add({
+    position: cart(endPos.lon, endPos.lat, (endPos.height || 0) + 1.5),
+    point: { pixelSize: 12, color: Cesium.Color.RED }
+  });
+
+  appendLog("End set. Calculating route...");
+  try {
+    await planRoute(routeStart, routeEnd);
+  } catch (error) {
+    appendLog("Route planning failed: " + error.message);
+  }
+}
 let viewer, youEntity;
 let heightOffsetValue = 0;
 let lastGps = null;
@@ -13,13 +66,6 @@ let planningMode = false;
 let routePlanBtnEl = null;
 let clearRouteBtnEl = null;
 let pendingPlanningMode = null;
-const destinationPoi = {
-  name: "Visitor center",
-  lon: 24.9765,
-  lat: 60.1857,
-  height: 5
-};
-let destinationEntity = null;
 let drawingMode = false;
 let drawPoints = [];
 let drawPointEntities = [];
@@ -31,6 +77,9 @@ let drawColorSelectEl = null;
 let drawSaveBtnEl = null;
 let drawRemoveBtnEl = null;
 let routeNameInputEl = null;
+let startModeRadios = [];
+let locationSearchInputEl = null;
+let locationSearchBtnEl = null;
 let drawRouteColor = "ORANGE";
 let savedRoutesListEl = null;
 let exportRoutesBtnEl = null;
@@ -38,6 +87,14 @@ let editingRouteId = null;
 let storedRouteEntities = {};
 const LOCAL_ROUTES_KEY = "viewerSavedRoutes";
 let storedRoutes = loadRoutesFromStorage();
+let baseConfigRoutes = [];
+let graphNodes = new Map();
+let graphAdjacency = new Map();
+const TEMP_NODE_PREFIX = "_tempNode";
+let followerEntity = null;
+let followerAnimationHandle = null;
+let followerAnimationState = null;
+const ROUTE_FOLLOWER_SPEED_MPS = 12.0;
 const DRAW_COLOR_MAP = {
   ORANGE: Cesium.Color.ORANGE,
   YELLOW: Cesium.Color.YELLOW,
@@ -89,6 +146,8 @@ async function init() {
 
   const cfg = await loadConfig();
   appendLog("config.json ladattu");
+  baseConfigRoutes = Array.isArray(cfg.routes) ? cfg.routes : [];
+  rebuildRouteGraph();
 
   viewer = new Cesium.Viewer("app", {
     terrain: cfg.useWorldTerrain ? Cesium.Terrain.fromWorldTerrain() : undefined,
@@ -137,7 +196,6 @@ async function init() {
 
   // Enable clicking on routes to show details
   setupRouteClickHandling();
-  addDestinationPoiMarker(destinationPoi);
   restoreStoredRoutesOnScene();
 
   } catch (e) {
@@ -147,9 +205,9 @@ async function init() {
   youEntity = viewer.entities.add({
     point: { pixelSize: 12, color: Cesium.Color.BLUE },
     label: {
-      text: "Minä",
+      text: "My Location",
       pixelOffset: new Cesium.Cartesian2(0, -30),
-      fillColor: Cesium.Color.BLACK,
+      fillColor: Cesium.Color.WHITE,
       showBackground: true
     }
   });
@@ -271,40 +329,10 @@ function enableRouteInfoClicks() {
       const route = picked.id.routeData;
       appendLog("Route clicked: " + route.name);
       setRouteInfo(route);
-    } else if (Cesium.defined(picked) && picked.id && picked.id.destinationPoi) {
-      const poi = picked.id.destinationPoi;
-      appendLog("Destination clicked: " + poi.name);
-      planRouteFromUserLocation(poi);
     } else {
       setRouteInfo(null);
     }
   }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
-}
-
-function addDestinationPoiMarker(poi) {
-  if (!viewer || !poi) return;
-  if (destinationEntity) {
-    viewer.entities.remove(destinationEntity);
-    destinationEntity = null;
-  }
-  destinationEntity = viewer.entities.add({
-    name: poi.name,
-    position: cart(poi.lon, poi.lat, poi.height || 0),
-    billboard: {
-      image: Cesium.buildModuleUrl("Assets/Textures/maki/marker.png"),
-      verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-      scale: 1.2
-    },
-    label: {
-      text: poi.name,
-      pixelOffset: new Cesium.Cartesian2(0, -40),
-      scale: 0.6,
-      fillColor: Cesium.Color.BLACK,
-      showBackground: true
-    }
-  });
-  destinationEntity.destinationPoi = poi;
-  appendLog("Destination marker added: " + poi.name);
 }
 
 function clearPlannedRoute() {
@@ -313,6 +341,7 @@ function clearPlannedRoute() {
   if (routeStartEntity) { viewer.entities.remove(routeStartEntity); routeStartEntity=null;}
   if (routeEndEntity) { viewer.entities.remove(routeEndEntity); routeEndEntity=null;}
   if (currentRouteEntity) { viewer.entities.remove(currentRouteEntity); currentRouteEntity=null;}
+  stopRouteFollower();
   appendLog("Cleared planned route.");
 }
 function getClickPosition(movement) {
@@ -376,36 +405,22 @@ function enablePlanningClicks() {
     if (drawingMode) return;
     const pickedPos = getClickPosition(movement);
     if (!pickedPos) return;
-    const pos = await clampPointToGround(pickedPos);
-    if (!routeStart) {
-      routeStart = pos;
-      routeStartEntity = viewer.entities.add({
-        position: cart(pos.lon, pos.lat, pos.height),
-        point: { pixelSize: 10, color: Cesium.Color.GREEN }
-      });
-      appendLog("Start set.");
-    } else if (!routeEnd) {
-      routeEnd = pos;
-      routeEndEntity = viewer.entities.add({
-        position: cart(pos.lon, pos.lat, pos.height),
-        point: { pixelSize: 10, color: Cesium.Color.RED }
-      });
-      appendLog("End set. Calculating route...");
-      try {
-        await planRoute(routeStart, routeEnd);
-      } catch (error) {
-        appendLog("Route planning failed: " + error.message);
-      }
-    } else {
-      clearPlannedRoute();
-      routeStart = pos;
-      routeStartEntity = viewer.entities.add({
-        position: cart(pos.lon, pos.lat, pos.height),
-        point: { pixelSize: 10, color: Cesium.Color.GREEN }
-      });
-      appendLog("Previous plan cleared. Start redefined.");
-    }
+    await handlePlanningClick(pickedPos);
   }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+}
+
+function getSelectedStartMode() {
+  const selected = startModeRadios.find((radio) => radio.checked);
+  return selected ? selected.value : "gps";
+}
+
+async function handlePlanningClick(pickedPos) {
+  const startMode = getSelectedStartMode();
+  if (startMode === "custom") {
+    await handleCustomStartPlanning(pickedPos);
+  } else {
+    await handleGpsStartPlanning(pickedPos);
+  }
 }
 
 function togglePlanningModeFromUI() {
@@ -747,6 +762,7 @@ function persistStoredRoutes() {
   } catch (err) {
     appendLog("Unable to persist routes: " + err.message);
   }
+  rebuildRouteGraph();
   renderSavedRoutesList();
   updateDrawingButtonsState();
 }
@@ -806,7 +822,15 @@ function addOrUpdateStoredRouteEntity(route) {
 
 function restoreStoredRoutesOnScene() {
   if (!viewer) return;
+  Object.keys(storedRouteEntities).forEach((routeId) => {
+    const entity = storedRouteEntities[routeId];
+    if (entity) {
+      viewer.entities.remove(entity);
+    }
+  });
+  storedRouteEntities = {};
   storedRoutes.forEach((route) => addOrUpdateStoredRouteEntity(route));
+  rebuildRouteGraph();
 }
 
 function deleteStoredRoute(routeId) {
@@ -878,6 +902,94 @@ function exportStoredRoutes() {
   appendLog("Routes exported.");
 }
 
+function startRouteFollower(positions) {
+  stopRouteFollower();
+  if (!viewer || !positions || positions.length < 2) return;
+
+  const segmentLengths = [];
+  let totalLength = 0;
+  for (let i = 1; i < positions.length; i++) {
+    const len = Cesium.Cartesian3.distance(positions[i - 1], positions[i]);
+    segmentLengths.push(len);
+    totalLength += len;
+  }
+  if (totalLength === 0) return;
+
+  followerEntity = viewer.entities.add({
+    position: positions[0],
+    point: { pixelSize: 12, color: Cesium.Color.BLUE },
+    label: {
+      text: "Route bot",
+      scale: 0.5,
+      pixelOffset: new Cesium.Cartesian2(0, -22),
+      showBackground: true
+    }
+  });
+
+  followerAnimationState = {
+    positions,
+    segmentLengths,
+    totalLength,
+    duration: Math.max(totalLength / ROUTE_FOLLOWER_SPEED_MPS, 1),
+    startTime: performance.now()
+  };
+
+  const step = (timestamp) => {
+    if (!followerAnimationState || !followerEntity) return;
+    const elapsed = (timestamp - followerAnimationState.startTime) / 1000;
+    const t = Math.min(elapsed / followerAnimationState.duration, 1);
+    const newPosition = getPositionAlongRoute(followerAnimationState, t);
+    if (newPosition) {
+      followerEntity.position = newPosition;
+    }
+    if (t >= 1) {
+      followerAnimationState = null;
+      followerAnimationHandle = null;
+      return;
+    }
+    followerAnimationHandle = requestAnimationFrame(step);
+  };
+
+  followerAnimationHandle = requestAnimationFrame(step);
+}
+
+function getPositionAlongRoute(state, fraction) {
+  if (!state || !state.positions || state.positions.length < 2) return null;
+  const targetDistance = state.totalLength * fraction;
+  if (targetDistance <= 0) {
+    return Cesium.Cartesian3.clone(state.positions[0]);
+  }
+  let accumulated = 0;
+  for (let i = 1; i < state.positions.length; i++) {
+    const segmentLength = state.segmentLengths[i - 1];
+    if (accumulated + segmentLength >= targetDistance) {
+      const segmentFraction = (targetDistance - accumulated) / segmentLength;
+      return Cesium.Cartesian3.lerp(
+        state.positions[i - 1],
+        state.positions[i],
+        segmentFraction,
+        new Cesium.Cartesian3()
+      );
+    }
+    accumulated += segmentLength;
+  }
+  return Cesium.Cartesian3.clone(
+    state.positions[state.positions.length - 1]
+  );
+}
+
+function stopRouteFollower() {
+  if (followerAnimationHandle) {
+    cancelAnimationFrame(followerAnimationHandle);
+    followerAnimationHandle = null;
+  }
+  followerAnimationState = null;
+  if (followerEntity && viewer) {
+    viewer.entities.remove(followerEntity);
+  }
+  followerEntity = null;
+}
+
 function attachDrawingButtons(startBtn, undoBtn, finishBtn, colorSelect, saveBtn, removeBtn) {
   drawStartBtnEl = startBtn;
   drawUndoBtnEl = undoBtn;
@@ -908,47 +1020,6 @@ function attachDrawingButtons(startBtn, undoBtn, finishBtn, colorSelect, saveBtn
   updateDrawingButtonsState();
 }
 
-async function planRouteFromUserLocation(poi) {
-  if (!viewer) {
-    appendLog("Viewer not ready yet.");
-    return;
-  }
-  if (!lastGps) {
-    appendLog("No GPS fix yet. Allow location access and try again.");
-    return;
-  }
-  const userGround = {
-    lon: lastGps.lon,
-    lat: lastGps.lat,
-    height: lastGps.ground || 0
-  };
-  const destination = {
-    lon: poi.lon,
-    lat: poi.lat,
-    height: poi.height || 0
-  };
-
-  const clampedStart = await clampPointToGround(userGround);
-  const clampedEnd = await clampPointToGround(destination);
-
-  clearPlannedRoute();
-
-  routeStart = clampedStart;
-  routeEnd = clampedEnd;
-
-  routeStartEntity = viewer.entities.add({
-    position: cart(clampedStart.lon, clampedStart.lat, (clampedStart.height || 0) + 1.5),
-    point: { pixelSize: 12, color: Cesium.Color.LIME }
-  });
-
-  routeEndEntity = viewer.entities.add({
-    position: cart(clampedEnd.lon, clampedEnd.lat, (clampedEnd.height || 0) + 1.5),
-    point: { pixelSize: 12, color: Cesium.Color.RED }
-  });
-
-  await planRoute(clampedStart, clampedEnd);
-}
-
 function buildTerrainSampledPositions(start, end, samples = 32) {
   const cartographics = [];
   for (let i = 0; i <= samples; i++) {
@@ -969,7 +1040,283 @@ function metersBetweenPoints(positions) {
   return total;
 }
 
+function rebuildRouteGraph() {
+  graphNodes = new Map();
+  graphAdjacency = new Map();
+  const combinedRoutes = [
+    ...(Array.isArray(baseConfigRoutes) ? baseConfigRoutes : []),
+    ...(Array.isArray(storedRoutes) ? storedRoutes : [])
+  ];
+  combinedRoutes.forEach((route) => addRouteToGraph(route));
+}
+
+function triggerLocationSearch() {
+  if (!viewer) return;
+  const query = locationSearchInputEl ? locationSearchInputEl.value.trim() : "";
+  if (!query) {
+    appendLog("Enter a place or coordinates to search.");
+    return;
+  }
+  performLocationSearch(query).catch((err) =>
+    appendLog("Search failed: " + err.message)
+  );
+}
+
+async function performLocationSearch(query) {
+  const coordResult = parseCoordinateQuery(query);
+  if (coordResult) {
+    flyCameraTo(coordResult.lon, coordResult.lat);
+    appendLog(
+      "Jumped to coordinates: " +
+        coordResult.lat.toFixed(4) +
+        ", " +
+        coordResult.lon.toFixed(4)
+    );
+    return;
+  }
+
+  appendLog('Searching "' + query + '" ...');
+  const url =
+    "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" +
+    encodeURIComponent(query);
+  const response = await fetch(url, {
+    headers: { Accept: "application/json" }
+  });
+  if (!response.ok) {
+    throw new Error("Geocoding service error (" + response.status + ")");
+  }
+  const data = await response.json();
+  if (!Array.isArray(data) || !data.length) {
+    appendLog("No results for search.");
+    return;
+  }
+  const hit = data[0];
+  const lon = parseFloat(hit.lon);
+  const lat = parseFloat(hit.lat);
+  if (Number.isNaN(lon) || Number.isNaN(lat)) {
+    appendLog("Search result missing coordinates.");
+    return;
+  }
+  flyCameraTo(lon, lat);
+  appendLog('Focused on "' + (hit.display_name || query) + '".');
+}
+
+function parseCoordinateQuery(query) {
+  const parts = query.split(",").map((p) => p.trim());
+  if (parts.length !== 2) return null;
+  const first = parseFloat(parts[0]);
+  const second = parseFloat(parts[1]);
+  if (Number.isNaN(first) || Number.isNaN(second)) return null;
+  // assume lat, lon if first within latitude bounds, otherwise lon, lat
+  if (Math.abs(first) <= 90 && Math.abs(second) <= 180) {
+    return { lat: first, lon: second };
+  }
+  if (Math.abs(second) <= 90 && Math.abs(first) <= 180) {
+    return { lat: second, lon: first };
+  }
+  return null;
+}
+
+function flyCameraTo(lon, lat) {
+  if (!viewer) return;
+  viewer.camera.flyTo({
+    destination: Cesium.Cartesian3.fromDegrees(lon, lat, 800),
+    duration: 1.5
+  });
+}
+
+function addRouteToGraph(route) {
+  if (!route || !route.points || route.points.length === 0) return;
+  const routeId = route.id || `route-${Math.random().toString(36).slice(2)}`;
+  route.points.forEach((pt, idx) => {
+    const nodeId = `${routeId}:${idx}`;
+    const height = pt.height || 0;
+    const cartesian = cart(pt.lon, pt.lat, height + 1.5);
+    graphNodes.set(nodeId, {
+      id: nodeId,
+      lon: pt.lon,
+      lat: pt.lat,
+      height,
+      cart: cartesian
+    });
+    if (!graphAdjacency.has(nodeId)) {
+      graphAdjacency.set(nodeId, []);
+    }
+    if (idx > 0) {
+      const prevId = `${routeId}:${idx - 1}`;
+      const prevNode = graphNodes.get(prevId);
+      if (!prevNode) return;
+      const dist = Cesium.Cartesian3.distance(prevNode.cart, cartesian);
+      graphAdjacency.get(nodeId).push({ id: prevId, weight: dist });
+      if (!graphAdjacency.has(prevId)) {
+        graphAdjacency.set(prevId, []);
+      }
+      graphAdjacency.get(prevId).push({ id: nodeId, weight: dist });
+    }
+  });
+}
+
+function findNearestGraphNodes(position, count = 3) {
+  if (!position || !graphNodes.size) return [];
+  const referenceCart = cart(position.lon, position.lat, (position.height || 0) + 1.5);
+  const distances = [];
+  graphNodes.forEach((node) => {
+    const dist = Cesium.Cartesian3.distance(referenceCart, node.cart);
+    distances.push({ node, dist });
+  });
+  distances.sort((a, b) => a.dist - b.dist);
+  return distances.slice(0, count);
+}
+
+function computeNetworkRoute(start, end) {
+  if (!graphNodes.size) return null;
+  const adjacency = new Map();
+  graphAdjacency.forEach((edges, key) => {
+    adjacency.set(
+      key,
+      edges.map((edge) => ({ id: edge.id, weight: edge.weight }))
+    );
+  });
+  const nodes = new Map();
+  graphNodes.forEach((node, key) => {
+    nodes.set(key, { ...node });
+  });
+
+  const startId = `${TEMP_NODE_PREFIX}-start-${Date.now()}`;
+  const endId = `${TEMP_NODE_PREFIX}-end-${Date.now()}`;
+  const startCart = cart(start.lon, start.lat, (start.height || 0) + 1.5);
+  const endCart = cart(end.lon, end.lat, (end.height || 0) + 1.5);
+
+  nodes.set(startId, { id: startId, lon: start.lon, lat: start.lat, height: start.height || 0, cart: startCart });
+  nodes.set(endId, { id: endId, lon: end.lon, lat: end.lat, height: end.height || 0, cart: endCart });
+  adjacency.set(startId, []);
+  adjacency.set(endId, []);
+
+  const startNeighbors = findNearestGraphNodes(start, 3);
+  const endNeighbors = findNearestGraphNodes(end, 3);
+  if (!startNeighbors.length || !endNeighbors.length) return null;
+
+  startNeighbors.forEach(({ node, dist }) => {
+    adjacency.get(startId).push({ id: node.id, weight: dist });
+    if (!adjacency.has(node.id)) adjacency.set(node.id, []);
+    adjacency.get(node.id).push({ id: startId, weight: dist });
+  });
+
+  endNeighbors.forEach(({ node, dist }) => {
+    adjacency.get(endId).push({ id: node.id, weight: dist });
+    if (!adjacency.has(node.id)) adjacency.set(node.id, []);
+    adjacency.get(node.id).push({ id: endId, weight: dist });
+  });
+
+  const pathIds = dijkstra(adjacency, startId, endId);
+  if (!pathIds || pathIds.length < 2) return null;
+
+  const positions = pathIds
+    .map((id) => nodes.get(id))
+    .filter(Boolean)
+    .map((node) => node.cart);
+
+  return {
+    positions,
+    lengthMeters: metersBetweenPoints(positions),
+    mode: "network"
+  };
+}
+
+function dijkstra(adjacency, startId, endId) {
+  const distances = new Map();
+  const previous = new Map();
+  const unvisited = new Set(adjacency.keys());
+
+  adjacency.forEach((_, key) => {
+    distances.set(key, key === startId ? 0 : Infinity);
+  });
+
+  while (unvisited.size > 0) {
+    let currentId = null;
+    let smallestDistance = Infinity;
+    unvisited.forEach((nodeId) => {
+      const dist = distances.get(nodeId);
+      if (dist < smallestDistance) {
+        smallestDistance = dist;
+        currentId = nodeId;
+      }
+    });
+
+    if (currentId === null) break;
+    if (currentId === endId) break;
+
+    unvisited.delete(currentId);
+    const neighbors = adjacency.get(currentId) || [];
+    neighbors.forEach(({ id: neighborId, weight }) => {
+      if (!unvisited.has(neighborId)) return;
+      const alt = distances.get(currentId) + weight;
+      if (alt < distances.get(neighborId)) {
+        distances.set(neighborId, alt);
+        previous.set(neighborId, currentId);
+      }
+    });
+  }
+
+  if (!previous.has(endId) && startId !== endId) return null;
+
+  const path = [];
+  let current = endId;
+  path.push(current);
+  while (current !== startId) {
+    current = previous.get(current);
+    if (!current) return null;
+    path.push(current);
+  }
+  return path.reverse();
+}
+
 async function planRoute(start, end) {
+  if (!viewer) return;
+  stopRouteFollower();
+
+  let routeResult = null;
+  const networkRoute = computeNetworkRoute(start, end);
+  if (networkRoute && networkRoute.positions && networkRoute.positions.length >= 2) {
+    routeResult = networkRoute;
+  } else {
+    routeResult = await buildTerrainLineRoute(start, end);
+  }
+
+  if (!routeResult || !routeResult.positions || routeResult.positions.length < 2) {
+    appendLog("Unable to compute route between selected points.");
+    return;
+  }
+
+  if (currentRouteEntity) {
+    viewer.entities.remove(currentRouteEntity);
+    currentRouteEntity = null;
+  }
+
+  const color =
+    routeResult.mode === "network" ? Cesium.Color.CYAN : Cesium.Color.RED;
+
+  currentRouteEntity = viewer.entities.add({
+    polyline: {
+      positions: routeResult.positions,
+      width: 4,
+      material: new Cesium.PolylineGlowMaterialProperty({
+        glowPower: 0.2,
+        color
+      })
+    }
+  });
+
+  startRouteFollower(routeResult.positions);
+
+  appendLog(
+    `${routeResult.mode === "network" ? "Network" : "Direct"} route, length approx. ` +
+      routeResult.lengthMeters.toFixed(0) +
+      " m."
+  );
+}
+
+async function buildTerrainLineRoute(start, end) {
   const samples = buildTerrainSampledPositions(start, end, 48);
   let terrain;
   try {
@@ -988,28 +1335,11 @@ async function planRoute(start, end) {
     );
   });
 
-  if (currentRouteEntity) {
-    viewer.entities.remove(currentRouteEntity);
-    currentRouteEntity = null;
-  }
-
-  currentRouteEntity = viewer.entities.add({
-    polyline: {
-      positions,
-      width: 4,
-      material: new Cesium.PolylineGlowMaterialProperty({
-        glowPower: 0.2,
-        color: Cesium.Color.RED
-      })
-    }
-  });
-
-  const lengthMeters = metersBetweenPoints(positions);
-  appendLog(
-    "Planned terrain-aware route, length approx. " +
-    lengthMeters.toFixed(0) +
-    " m."
-  );
+  return {
+    positions,
+    lengthMeters: metersBetweenPoints(positions),
+    mode: "direct"
+  };
 }
 
 function setupUI() {
@@ -1025,6 +1355,9 @@ function setupUI() {
   const drawSaveBtn = document.getElementById("drawSaveBtn");
   const drawRemoveBtn = document.getElementById("drawRemoveBtn");
   routeNameInputEl = document.getElementById("routeNameInput");
+  startModeRadios = Array.from(document.querySelectorAll('input[name="startMode"]'));
+  locationSearchInputEl = document.getElementById("locationSearchInput");
+  locationSearchBtnEl = document.getElementById("locationSearchBtn");
   savedRoutesListEl = document.getElementById("savedRoutesList");
   exportRoutesBtnEl = document.getElementById("exportRoutesBtn");
 
@@ -1070,6 +1403,30 @@ function setupUI() {
 
   attachPlanningButtons(planBtn, clearRouteBtn);
   attachDrawingButtons(drawRouteBtn, drawUndoBtn, drawFinishBtn, drawColorSelect, drawSaveBtn, drawRemoveBtn);
+
+  if (startModeRadios.length) {
+    startModeRadios.forEach((radio) => {
+      radio.onchange = () => {
+        appendLog(
+          radio.value === "gps"
+            ? "Start mode set to GPS. Only click destination."
+            : "Start mode set to Custom. Click start point first."
+        );
+      };
+    });
+  }
+
+  if (locationSearchBtnEl) {
+    locationSearchBtnEl.onclick = () => triggerLocationSearch();
+  }
+  if (locationSearchInputEl) {
+    locationSearchInputEl.addEventListener("keydown", (evt) => {
+      if (evt.key === "Enter") {
+        evt.preventDefault();
+        triggerLocationSearch();
+      }
+    });
+  }
 
   if (exportRoutesBtnEl) {
     exportRoutesBtnEl.onclick = exportStoredRoutes;
